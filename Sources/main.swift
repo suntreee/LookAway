@@ -5,11 +5,17 @@ enum EyePhase: String {
     case rest
 }
 
+enum TimeDisplayMode: String {
+    case full
+    case compact
+}
+
 struct Settings {
     var workSeconds: Int
     var restSeconds: Int
     var rhythmName: String
     var isCustomRhythm: Bool
+    var timeDisplayMode: TimeDisplayMode
 
     static let defaults = UserDefaults.standard
 
@@ -21,7 +27,8 @@ struct Settings {
             workSeconds: (hasNewSavedValues || hasLegacySavedValues) ? max(1, savedWorkSeconds) : 20 * 60,
             restSeconds: (hasNewSavedValues || hasLegacySavedValues) ? max(1, defaults.integer(forKey: "restSeconds")) : 20,
             rhythmName: defaults.string(forKey: "rhythmName") ?? "20-20-20",
-            isCustomRhythm: defaults.bool(forKey: "isCustomRhythm")
+            isCustomRhythm: defaults.bool(forKey: "isCustomRhythm"),
+            timeDisplayMode: TimeDisplayMode(rawValue: defaults.string(forKey: "timeDisplayMode") ?? "") ?? .full
         )
     }
 
@@ -30,6 +37,7 @@ struct Settings {
         Settings.defaults.set(restSeconds, forKey: "restSeconds")
         Settings.defaults.set(rhythmName, forKey: "rhythmName")
         Settings.defaults.set(isCustomRhythm, forKey: "isCustomRhythm")
+        Settings.defaults.set(timeDisplayMode.rawValue, forKey: "timeDisplayMode")
     }
 }
 
@@ -204,16 +212,16 @@ final class TimerModel {
 
 final class StatusIconFactory {
     static func image(progress: Double, phase: EyePhase, isRunning: Bool) -> NSImage {
-        let size = NSSize(width: 32, height: 16)
+        let size = NSSize(width: 30, height: 16)
         let image = NSImage(size: size)
         image.lockFocus()
 
         NSColor.clear.setFill()
         NSRect(origin: .zero, size: size).fill()
 
-        let barRect = NSRect(x: 3, y: 5, width: 26, height: 6)
-        let track = NSBezierPath(roundedRect: barRect, xRadius: 3, yRadius: 3)
-        NSColor.systemGray.withAlphaComponent(0.35).setFill()
+        let barRect = NSRect(x: 4, y: 6, width: 22, height: 4)
+        let track = NSBezierPath(roundedRect: barRect, xRadius: 2, yRadius: 2)
+        NSColor.systemGray.withAlphaComponent(isRunning ? 0.35 : 0.22).setFill()
         track.fill()
 
         let clamped = max(0, min(1, progress))
@@ -222,11 +230,6 @@ final class StatusIconFactory {
             let fill = NSBezierPath(roundedRect: fillRect, xRadius: 3, yRadius: 3)
             (phase == .work ? NSColor.systemBlue : NSColor.systemGreen).setFill()
             fill.fill()
-        }
-
-        if !isRunning {
-            NSColor.systemOrange.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 13, y: 1, width: 6, height: 6)).fill()
         }
 
         image.unlockFocus()
@@ -323,6 +326,7 @@ final class RestPanelController: NSWindowController {
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let model: TimerModel
     private let presetPopup = NSPopUpButton()
+    private let displayModePopup = NSPopUpButton()
     private let rhythmNameField = NSTextField()
     private let workHoursField = NSTextField()
     private let workMinutesField = NSTextField()
@@ -340,7 +344,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     init(model: TimerModel) {
         self.model = model
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 305, height: 405),
+            contentRect: NSRect(x: 0, y: 0, width: 315, height: 430),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -370,6 +374,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         presetPopup.target = self
         presetPopup.action = #selector(applyPreset)
 
+        displayModePopup.addItems(withTitles: ["完整 1:20:30", "简约 1h12m"])
+
         rhythmNameField.placeholderString = "我的节奏"
         rhythmNameField.delegate = self
 
@@ -390,6 +396,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [label("名称"), rhythmNameField],
             [label("专注"), durationStack(hours: workHoursField, minutes: workMinutesField, seconds: workSecondsField)],
             [label("休息"), durationStack(hours: restHoursField, minutes: restMinutesField, seconds: restSecondsField)],
+            [label("显示"), displayModePopup],
             [label("启动"), launchAtLoginCheckbox]
         ])
         timingGrid.column(at: 0).xPlacement = .trailing
@@ -476,6 +483,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         setDuration(model.settings.workSeconds, hours: workHoursField, minutes: workMinutesField, seconds: workSecondsField)
         setDuration(model.settings.restSeconds, hours: restHoursField, minutes: restMinutesField, seconds: restSecondsField)
         rhythmNameField.stringValue = model.settings.rhythmName
+        displayModePopup.selectItem(at: model.settings.timeDisplayMode == .full ? 0 : 1)
         launchAtLoginCheckbox.state = LaunchAtLoginManager.isEnabled ? .on : .off
         selectPresetForCurrentValues()
         refreshNameField()
@@ -498,6 +506,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         settings.restSeconds = rest
         settings.isCustomRhythm = selectedIndex == 3
         settings.rhythmName = settings.isCustomRhythm ? (customName.isEmpty ? "我的节奏" : customName) : presetTitle(for: selectedIndex)
+        settings.timeDisplayMode = displayModePopup.indexOfSelectedItem == 0 ? .full : .compact
         model.applySettings(settings)
         do {
             try LaunchAtLoginManager.setEnabled(launchAtLoginCheckbox.state == .on)
@@ -660,7 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let elapsed = Double(model.totalSeconds - model.remainingSeconds)
         let progress = model.totalSeconds > 0 ? elapsed / Double(model.totalSeconds) : 0
         statusItem.button?.image = StatusIconFactory.image(progress: progress, phase: model.phase, isRunning: model.isRunning)
-        statusItem.button?.title = format(model.remainingSeconds)
+        statusItem.button?.title = formatStatusTime(model.remainingSeconds, mode: model.settings.timeDisplayMode)
         statusItem.button?.toolTip = model.phase == .work ? "专注计时中，点击打开菜单" : "休息计时中，点击打开菜单"
         refreshMenu()
         settingsWindow.refreshStats()
@@ -678,7 +687,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshMenu() {
         let phase = model.phase == .work ? "专注中" : "休息中"
-        stateMenuItem.title = "\(phase) · 还剩 \(format(model.remainingSeconds))"
+        stateMenuItem.title = "\(phase) · 还剩 \(formatStatusTime(model.remainingSeconds, mode: model.settings.timeDisplayMode))"
         pauseMenuItem.title = model.isRunning ? "暂停" : "继续"
         restMenuItem.title = model.phase == .work ? "跳到休息" : "结束休息"
     }
@@ -715,9 +724,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 }
 
+func formatStatusTime(_ seconds: Int, mode: TimeDisplayMode) -> String {
+    let clamped = max(0, seconds)
+    switch mode {
+    case .full:
+        return format(clamped)
+    case .compact:
+        let hours = clamped / 3600
+        let minutes = (clamped % 3600) / 60
+        if hours > 0 {
+            return "\(hours)h\(minutes)m"
+        }
+        if clamped == 0 {
+            return "0m"
+        }
+        return "\(max(1, minutes))m"
+    }
+}
+
 func format(_ seconds: Int) -> String {
-    let minutes = max(0, seconds) / 60
-    let remainder = max(0, seconds) % 60
+    let clamped = max(0, seconds)
+    let hours = clamped / 3600
+    let minutes = (clamped % 3600) / 60
+    let remainder = clamped % 60
+    if hours > 0 {
+        return String(format: "%d:%02d:%02d", hours, minutes, remainder)
+    }
     return String(format: "%02d:%02d", minutes, remainder)
 }
 
