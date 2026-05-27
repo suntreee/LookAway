@@ -374,7 +374,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         presetPopup.target = self
         presetPopup.action = #selector(applyPreset)
 
-        displayModePopup.addItems(withTitles: ["完整 1:20:30", "简约 1h12m"])
+        displayModePopup.addItems(withTitles: ["完整 h:mm:ss / m:ss", "简约 hhm / mm"])
 
         rhythmNameField.placeholderString = "我的节奏"
         rhythmNameField.delegate = self
