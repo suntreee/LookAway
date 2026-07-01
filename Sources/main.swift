@@ -10,12 +10,19 @@ enum TimeDisplayMode: String {
     case compact
 }
 
+enum ReminderStyle: String {
+    case softCard
+    case dimScreen
+    case breathingBorder
+}
+
 struct Settings {
     var workSeconds: Int
     var restSeconds: Int
     var rhythmName: String
     var isCustomRhythm: Bool
     var timeDisplayMode: TimeDisplayMode
+    var reminderStyle: ReminderStyle
 
     static let defaults = UserDefaults.standard
 
@@ -28,7 +35,8 @@ struct Settings {
             restSeconds: (hasNewSavedValues || hasLegacySavedValues) ? max(1, defaults.integer(forKey: "restSeconds")) : 20,
             rhythmName: defaults.string(forKey: "rhythmName") ?? "20-20-20",
             isCustomRhythm: defaults.bool(forKey: "isCustomRhythm"),
-            timeDisplayMode: TimeDisplayMode(rawValue: defaults.string(forKey: "timeDisplayMode") ?? "") ?? .full
+            timeDisplayMode: TimeDisplayMode(rawValue: defaults.string(forKey: "timeDisplayMode") ?? "") ?? .full,
+            reminderStyle: ReminderStyle(rawValue: defaults.string(forKey: "reminderStyle") ?? "") ?? .softCard
         )
     }
 
@@ -38,6 +46,7 @@ struct Settings {
         Settings.defaults.set(rhythmName, forKey: "rhythmName")
         Settings.defaults.set(isCustomRhythm, forKey: "isCustomRhythm")
         Settings.defaults.set(timeDisplayMode.rawValue, forKey: "timeDisplayMode")
+        Settings.defaults.set(reminderStyle.rawValue, forKey: "reminderStyle")
     }
 }
 
@@ -210,34 +219,6 @@ final class TimerModel {
     }
 }
 
-final class StatusIconFactory {
-    static func image(progress: Double, phase: EyePhase, isRunning: Bool) -> NSImage {
-        let size = NSSize(width: 30, height: 16)
-        let image = NSImage(size: size)
-        image.lockFocus()
-
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: size).fill()
-
-        let barRect = NSRect(x: 4, y: 6, width: 22, height: 4)
-        let track = NSBezierPath(roundedRect: barRect, xRadius: 2, yRadius: 2)
-        NSColor.systemGray.withAlphaComponent(isRunning ? 0.35 : 0.22).setFill()
-        track.fill()
-
-        let clamped = max(0, min(1, progress))
-        if clamped > 0 {
-            let fillRect = NSRect(x: barRect.minX, y: barRect.minY, width: barRect.width * CGFloat(clamped), height: barRect.height)
-            let fill = NSBezierPath(roundedRect: fillRect, xRadius: 3, yRadius: 3)
-            (phase == .work ? NSColor.systemBlue : NSColor.systemGreen).setFill()
-            fill.fill()
-        }
-
-        image.unlockFocus()
-        image.isTemplate = false
-        return image
-    }
-}
-
 final class RestPanelController: NSWindowController {
     private let titleLabel = NSTextField(labelWithString: "看向远处，放松一下")
     private let countdownLabel = NSTextField(labelWithString: "")
@@ -246,12 +227,14 @@ final class RestPanelController: NSWindowController {
     init() {
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 190),
-            styleMask: [.titled, .closable, .utilityWindow],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        window.title = "LookAway"
         window.level = .floating
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
         window.center()
         super.init(window: window)
         buildUI()
@@ -263,8 +246,11 @@ final class RestPanelController: NSWindowController {
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 18
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.94).cgColor
 
-        titleLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        titleLabel.font = NSFont.systemFont(ofSize: 21, weight: .semibold)
         titleLabel.alignment = .center
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -278,6 +264,7 @@ final class RestPanelController: NSWindowController {
         countdownLabel.alignment = .center
         countdownLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        closeButton.bezelStyle = .rounded
         closeButton.target = self
         closeButton.action = #selector(closePanel)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -310,12 +297,23 @@ final class RestPanelController: NSWindowController {
 
     func show() {
         window?.center()
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        window?.alphaValue = 0
+        window?.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            window?.animator().alphaValue = 1
+        }
     }
 
     func hide() {
-        window?.orderOut(nil)
+        guard let window = window, window.isVisible else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            window.animator().alphaValue = 0
+        } completionHandler: {
+            window.orderOut(nil)
+            window.alphaValue = 1
+        }
     }
 
     @objc private func closePanel() {
@@ -323,10 +321,168 @@ final class RestPanelController: NSWindowController {
     }
 }
 
+final class ReminderOverlayView: NSView {
+    let countdownLabel = NSTextField(labelWithString: "")
+    private let style: ReminderStyle
+    private var pulse: CGFloat = 0
+
+    init(style: ReminderStyle) {
+        self.style = style
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = style == .dimScreen ? NSColor.black.withAlphaComponent(0.16).cgColor : NSColor.clear.cgColor
+        buildCard()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func buildCard() {
+        let card = NSVisualEffectView()
+        card.material = .popover
+        card.blendingMode = .withinWindow
+        card.state = .active
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 18
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: "看向远处，放松一下")
+        title.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+        title.alignment = .center
+
+        countdownLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 26, weight: .medium)
+        countdownLabel.alignment = .center
+        countdownLabel.textColor = NSColor.labelColor
+
+        let stack = NSStackView(views: [title, countdownLabel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(card)
+        card.addSubview(stack)
+
+        let width: CGFloat = style == .breathingBorder ? 260 : 320
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: centerYAnchor),
+            card.widthAnchor.constraint(equalToConstant: width),
+            card.heightAnchor.constraint(equalToConstant: 118),
+            stack.centerXAnchor.constraint(equalTo: card.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: card.centerYAnchor)
+        ])
+    }
+
+    func setPulse(_ value: CGFloat) {
+        pulse = value
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard style == .breathingBorder else { return }
+        let alpha = 0.22 + 0.16 * pulse
+        let inset: CGFloat = 18
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 24, yRadius: 24)
+        path.lineWidth = 5
+        NSColor.systemTeal.withAlphaComponent(alpha).setStroke()
+        path.stroke()
+    }
+}
+
+final class RestReminderController {
+    private let softCard = RestPanelController()
+    private var overlayWindows: [NSWindow] = []
+    private var overlayViews: [ReminderOverlayView] = []
+    private var pulseTimer: Timer?
+    private var pulseStep: CGFloat = 0
+    private var activeStyle: ReminderStyle = .softCard
+
+    func show(style: ReminderStyle, seconds: Int) {
+        hide()
+        activeStyle = style
+        if style == .softCard {
+            softCard.update(seconds: seconds)
+            softCard.show()
+            return
+        }
+
+        for screen in NSScreen.screens {
+            let view = ReminderOverlayView(style: style)
+            view.countdownLabel.stringValue = "\(seconds)s"
+            let window = NSWindow(
+                contentRect: screen.frame,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false,
+                screen: screen
+            )
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.ignoresMouseEvents = true
+            window.contentView = view
+            window.alphaValue = 0
+            overlayWindows.append(window)
+            overlayViews.append(view)
+            window.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                window.animator().alphaValue = 1
+            }
+        }
+
+        if style == .breathingBorder {
+            startPulse()
+        }
+    }
+
+    func update(seconds: Int) {
+        if activeStyle == .softCard {
+            softCard.update(seconds: seconds)
+        } else {
+            overlayViews.forEach { $0.countdownLabel.stringValue = "\(seconds)s" }
+        }
+    }
+
+    func hide() {
+        softCard.hide()
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+
+        let windows = overlayWindows
+        overlayWindows.removeAll()
+        overlayViews.removeAll()
+        for window in windows {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                window.animator().alphaValue = 0
+            } completionHandler: {
+                window.orderOut(nil)
+            }
+        }
+    }
+
+    private func startPulse() {
+        pulseStep = 0
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.pulseStep += 0.06
+            let value = (sin(self.pulseStep) + 1) / 2
+            self.overlayViews.forEach { $0.setPulse(value) }
+        }
+    }
+}
+
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let model: TimerModel
     private let presetPopup = NSPopUpButton()
     private let displayModePopup = NSPopUpButton()
+    private let reminderStylePopup = NSPopUpButton()
     private let rhythmNameField = NSTextField()
     private let workHoursField = NSTextField()
     private let workMinutesField = NSTextField()
@@ -344,7 +500,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     init(model: TimerModel) {
         self.model = model
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 315, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 315, height: 462),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -375,6 +531,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         presetPopup.action = #selector(applyPreset)
 
         displayModePopup.addItems(withTitles: ["完整 h:mm:ss / m:ss", "简约 hhm / mm"])
+        reminderStylePopup.addItems(withTitles: ["柔和卡片", "渐暗屏幕", "边框呼吸"])
 
         rhythmNameField.placeholderString = "我的节奏"
         rhythmNameField.delegate = self
@@ -397,6 +554,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
             [label("专注"), durationStack(hours: workHoursField, minutes: workMinutesField, seconds: workSecondsField)],
             [label("休息"), durationStack(hours: restHoursField, minutes: restMinutesField, seconds: restSecondsField)],
             [label("显示"), displayModePopup],
+            [label("提醒"), reminderStylePopup],
             [label("启动"), launchAtLoginCheckbox]
         ])
         timingGrid.column(at: 0).xPlacement = .trailing
@@ -484,6 +642,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         setDuration(model.settings.restSeconds, hours: restHoursField, minutes: restMinutesField, seconds: restSecondsField)
         rhythmNameField.stringValue = model.settings.rhythmName
         displayModePopup.selectItem(at: model.settings.timeDisplayMode == .full ? 0 : 1)
+        switch model.settings.reminderStyle {
+        case .softCard:
+            reminderStylePopup.selectItem(at: 0)
+        case .dimScreen:
+            reminderStylePopup.selectItem(at: 1)
+        case .breathingBorder:
+            reminderStylePopup.selectItem(at: 2)
+        }
         launchAtLoginCheckbox.state = LaunchAtLoginManager.isEnabled ? .on : .off
         selectPresetForCurrentValues()
         refreshNameField()
@@ -507,6 +673,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         settings.isCustomRhythm = selectedIndex == 3
         settings.rhythmName = settings.isCustomRhythm ? (customName.isEmpty ? "我的节奏" : customName) : presetTitle(for: selectedIndex)
         settings.timeDisplayMode = displayModePopup.indexOfSelectedItem == 0 ? .full : .compact
+        switch reminderStylePopup.indexOfSelectedItem {
+        case 1:
+            settings.reminderStyle = .dimScreen
+        case 2:
+            settings.reminderStyle = .breathingBorder
+        default:
+            settings.reminderStyle = .softCard
+        }
         model.applySettings(settings)
         do {
             try LaunchAtLoginManager.setEnabled(launchAtLoginCheckbox.state == .on)
@@ -631,7 +805,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let model = TimerModel()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private lazy var settingsWindow = SettingsWindowController(model: model)
-    private let restPanel = RestPanelController()
+    private let restReminder = RestReminderController()
     private let statusMenu = NSMenu()
     private let stateMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let pauseMenuItem = NSMenuItem(title: "暂停", action: #selector(toggleRunning), keyEquivalent: "")
@@ -666,23 +840,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshUI() {
-        let elapsed = Double(model.totalSeconds - model.remainingSeconds)
-        let progress = model.totalSeconds > 0 ? elapsed / Double(model.totalSeconds) : 0
-        statusItem.button?.image = StatusIconFactory.image(progress: progress, phase: model.phase, isRunning: model.isRunning)
+        statusItem.button?.image = nil
         statusItem.button?.title = formatStatusTime(model.remainingSeconds, mode: model.settings.timeDisplayMode)
         statusItem.button?.toolTip = model.phase == .work ? "专注计时中，点击打开菜单" : "休息计时中，点击打开菜单"
         refreshMenu()
         settingsWindow.refreshStats()
         if model.phase == .rest {
-            restPanel.update(seconds: model.remainingSeconds)
+            restReminder.update(seconds: model.remainingSeconds)
         } else {
-            restPanel.hide()
+            restReminder.hide()
         }
     }
 
     private func startRestReminder() {
-        restPanel.update(seconds: model.remainingSeconds)
-        restPanel.show()
+        restReminder.show(style: model.settings.reminderStyle, seconds: model.remainingSeconds)
     }
 
     private func refreshMenu() {
