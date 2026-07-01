@@ -1,5 +1,3 @@
-<img width="326" height="461" alt="image" src="https://github.com/user-attachments/assets/614900f5-8f2a-4678-a79c-52ec45e6b554" /># LookAway
-
 LookAway 是一个原生 macOS 菜单栏护眼提醒工具。它会在菜单栏显示当前倒计时，用轻量的视觉提醒让你把目光从屏幕移开一会儿。
 
 默认节奏是 `20-20-20`：专注 20 分钟，休息 20 秒。你也可以切换到番茄钟、深度专注，或者保存自己的自定义节奏。
